@@ -130,6 +130,21 @@ export default function App() {
   // Sound Synth via Web Audio API
   const audioCtxRef = useRef(null);
 
+  // Latest values for delayed callbacks, which would otherwise read stale state
+  const hpRef = useRef({ p1: 100, p2: 100 });
+  const answersRef = useRef({ 1: null, 2: null });
+  const timeoutsRef = useRef([]);
+
+  const schedule = (fn, ms) => {
+    timeoutsRef.current.push(setTimeout(fn, ms));
+  };
+
+  const clearScheduled = () => {
+    timeoutsRef.current.forEach(clearTimeout);
+    timeoutsRef.current = [];
+    setFloatingDamage(null);
+  };
+
   const playSound = (type) => {
     if (!soundEnabled) return;
     try {
@@ -192,6 +207,8 @@ export default function App() {
   };
 
   const startGame = () => {
+    clearScheduled();
+    hpRef.current = { p1: 100, p2: 100 };
     setGameState('playing');
     setCurrentRound(1);
     setP1Hp(100);
@@ -201,7 +218,13 @@ export default function App() {
     resetRoundState();
   };
 
+  const openSetup = () => {
+    clearScheduled();
+    setGameState('setup');
+  };
+
   const resetRoundState = () => {
+    answersRef.current = { 1: null, 2: null };
     setP1SelectedAnswer(null);
     setP2SelectedAnswer(null);
     setP1Answered(false);
@@ -217,23 +240,13 @@ export default function App() {
 
     const timer = setInterval(() => {
       if (!p1Answered && p1TimeLeft > 0) {
-        setP1TimeLeft((prev) => {
-          if (prev <= 1) {
-            handlePlayerAnswer(1, -1);
-            return 0;
-          }
-          return prev - 1;
-        });
+        setP1TimeLeft(p1TimeLeft - 1);
+        if (p1TimeLeft <= 1) handlePlayerAnswer(1, -1);
       }
 
       if (!p2Answered && p2TimeLeft > 0) {
-        setP2TimeLeft((prev) => {
-          if (prev <= 1) {
-            handlePlayerAnswer(2, -1);
-            return 0;
-          }
-          return prev - 1;
-        });
+        setP2TimeLeft(p2TimeLeft - 1);
+        if (p2TimeLeft <= 1) handlePlayerAnswer(2, -1);
       }
     }, 1000);
 
@@ -242,8 +255,8 @@ export default function App() {
 
   // Player click answer
   const handlePlayerAnswer = (playerNum, optionIndex) => {
-    if (playerNum === 1 && p1Answered) return;
-    if (playerNum === 2 && p2Answered) return;
+    if (answersRef.current[playerNum] !== null) return;
+    answersRef.current[playerNum] = optionIndex;
 
     const q = playerNum === 1 ? p1Questions[p1QIndex] : p2Questions[p2QIndex];
     const isCorrect = optionIndex === q.correct;
@@ -259,13 +272,12 @@ export default function App() {
     if (isCorrect) playSound('correct');
     else playSound('wrong');
 
-    const p1Done = playerNum === 1 ? true : p1Answered;
-    const p2Done = playerNum === 2 ? true : p2Answered;
+    const { 1: p1Answer, 2: p2Answer } = answersRef.current;
 
-    if (p1Done && p2Done) {
+    if (p1Answer !== null && p2Answer !== null) {
       evaluateRoundResults(
-        playerNum === 1 ? isCorrect : (p1SelectedAnswer === p1Questions[p1QIndex].correct),
-        playerNum === 2 ? isCorrect : (p2SelectedAnswer === p2Questions[p2QIndex].correct)
+        p1Answer === p1Questions[p1QIndex].correct,
+        p2Answer === p2Questions[p2QIndex].correct
       );
     }
   };
@@ -276,15 +288,15 @@ export default function App() {
     if (p2Correct) sequence.push('p2Attack');
 
     if (sequence.length === 0) {
-      setTimeout(advanceRound, 1500);
+      schedule(advanceRound, 1500);
     } else {
-      runAnimationSequence(sequence, 0, p1Correct, p2Correct);
+      runAnimationSequence(sequence, 0);
     }
   };
 
-  const runAnimationSequence = (seq, index, p1Correct, p2Correct) => {
+  const runAnimationSequence = (seq, index) => {
     if (index >= seq.length) {
-      checkGameStatusAfterRound(p1Correct, p2Correct);
+      advanceRound();
       return;
     }
 
@@ -293,37 +305,29 @@ export default function App() {
     playSound('hit');
 
     if (currentAnimType === 'p1Attack') {
-      setP2Hp((prev) => Math.max(0, prev - damageAmount));
+      hpRef.current.p2 = Math.max(0, hpRef.current.p2 - damageAmount);
+      setP2Hp(hpRef.current.p2);
       setFloatingDamage({ target: 'p2', text: `-${damageAmount} HP` });
     } else if (currentAnimType === 'p2Attack') {
-      setP1Hp((prev) => Math.max(0, prev - damageAmount));
+      hpRef.current.p1 = Math.max(0, hpRef.current.p1 - damageAmount);
+      setP1Hp(hpRef.current.p1);
       setFloatingDamage({ target: 'p1', text: `-${damageAmount} HP` });
     }
 
     // Play full attack animation duration without interruptions
-    setTimeout(() => {
+    schedule(() => {
       setFloatingDamage(null);
       setActiveAnim('idle');
-      setTimeout(() => {
-        runAnimationSequence(seq, index + 1, p1Correct, p2Correct);
+      schedule(() => {
+        runAnimationSequence(seq, index + 1);
       }, 300);
     }, 3800);
   };
 
-  const checkGameStatusAfterRound = (p1Correct, p2Correct) => {
-    const finalP1Hp = p1Correct && activeAnim === 'p2Attack' ? p1Hp - damageAmount : p1Hp;
-    const finalP2Hp = p2Correct && activeAnim === 'p1Attack' ? p2Hp - damageAmount : p2Hp;
-
-    if (finalP1Hp <= 0 || finalP2Hp <= 0 || currentRound >= maxRounds) {
-      endGame(finalP1Hp, finalP2Hp);
-    } else {
-      advanceRound();
-    }
-  };
-
   const advanceRound = () => {
-    if (currentRound >= maxRounds || p1Hp <= 0 || p2Hp <= 0) {
-      endGame(p1Hp, p2Hp);
+    const { p1, p2 } = hpRef.current;
+    if (currentRound >= maxRounds || p1 <= 0 || p2 <= 0) {
+      endGame(p1, p2);
       return;
     }
 
@@ -340,7 +344,7 @@ export default function App() {
     } else if (finalP2Hp > finalP1Hp) {
       setActiveAnim('p2Win');
     } else {
-      setActiveAnim('p1Win');
+      setActiveAnim('idle');
     }
     setGameState('gameover');
   };
@@ -382,7 +386,7 @@ export default function App() {
             </button>
           ) : (
             <button
-              onClick={() => setGameState('setup')}
+              onClick={openSetup}
               className="flex items-center space-x-2 bg-slate-800 hover:bg-slate-700 px-5 py-2.5 rounded-xl font-bold border border-slate-700 transition"
             >
               <Settings className="w-4 h-4" />
@@ -471,7 +475,8 @@ export default function App() {
                       <input 
                         type="number" 
                         value={maxRounds} 
-                        onChange={(e) => setMaxRounds(Number(e.target.value))}
+                        min={1}
+                        onChange={(e) => setMaxRounds(Math.max(1, Number(e.target.value) || 1))}
                         className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-white focus:outline-none" 
                       />
                     </div>
@@ -480,7 +485,8 @@ export default function App() {
                       <input 
                         type="number" 
                         value={timeLimit} 
-                        onChange={(e) => setTimeLimit(Number(e.target.value))}
+                        min={1}
+                        onChange={(e) => setTimeLimit(Math.max(1, Number(e.target.value) || 1))}
                         className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-white focus:outline-none" 
                       />
                     </div>
@@ -571,18 +577,12 @@ export default function App() {
               {/* Stacked Videos for Zero Black Screen / Instant Seamless Switching */}
               <div className="absolute inset-0 w-full h-full">
                 {Object.keys(videos).map((key) => {
-                  let isVisible = false;
-                  if (gameState === 'gameover') {
-                    if (activeAnim === 'p1Win' && key === 'p1Win') isVisible = true;
-                    else if (activeAnim === 'p2Win' && key === 'p2Win') isVisible = true;
-                    else if (activeAnim !== 'p1Win' && activeAnim !== 'p2Win' && key === 'p1Win') isVisible = true;
-                  } else {
-                    if (activeAnim === key) isVisible = true;
-                  }
+                  const isVisible = activeAnim === key;
 
                   return (
                     <iframe
-                      key={key}
+                      // The player loops from load, so remount to start a clip from its first frame
+                      key={key === 'idle' ? key : `${key}-${isVisible}`}
                       src={videos[key]}
                       className={`absolute inset-0 w-full h-full border-0 pointer-events-none transition-opacity duration-300 ${
                         isVisible ? 'opacity-100 z-10' : 'opacity-0 z-0'
@@ -603,10 +603,10 @@ export default function App() {
                     </div>
                     <div className="text-left">
                       <h3 className="text-xl font-black bg-gradient-to-r from-amber-400 to-orange-400 bg-clip-text text-transparent">
-                        ЖЕҢІМПАЗ АНЫҚТАЛДЫ!
+                        {p1Hp === p2Hp ? "ОЙЫН ТЕҢ АЯҚТАЛДЫ!" : "ЖЕҢІМПАЗ АНЫҚТАЛДЫ!"}
                       </h3>
                       <p className="text-base font-extrabold text-white">
-                        👑 {p1Hp > p2Hp ? p1Name : p2Hp > p1Hp ? p2Name : "Тең есеп!"} 👑
+                        {p1Hp === p2Hp ? "Тең есеп!" : `👑 ${p1Hp > p2Hp ? p1Name : p2Name} 👑`}
                       </p>
                     </div>
                   </div>
@@ -620,7 +620,7 @@ export default function App() {
                       <span>Қайта ойнау</span>
                     </button>
                     <button
-                      onClick={() => setGameState('setup')}
+                      onClick={openSetup}
                       className="flex items-center space-x-2 bg-slate-800 hover:bg-slate-700 text-white font-bold px-4 py-2.5 rounded-xl border border-slate-700 transition text-sm"
                     >
                       <Settings className="w-4 h-4" />
@@ -671,7 +671,7 @@ export default function App() {
                           onClick={() => handlePlayerAnswer(1, idx)}
                           className={`p-3 rounded-xl border text-sm font-semibold transition text-left flex items-center justify-between ${btnStyle}`}
                         >
-                          <span className="truncate">{opt}</span>
+                          <span className="min-w-0 break-words">{opt}</span>
                           {p1Answered && isCorrectAnswer && <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0 ml-1" />}
                           {p1Answered && isSelected && !isCorrectAnswer && <XCircle className="w-4 h-4 text-red-400 flex-shrink-0 ml-1" />}
                         </button>
@@ -716,7 +716,7 @@ export default function App() {
                           onClick={() => handlePlayerAnswer(2, idx)}
                           className={`p-3 rounded-xl border text-sm font-semibold transition text-left flex items-center justify-between ${btnStyle}`}
                         >
-                          <span className="truncate">{opt}</span>
+                          <span className="min-w-0 break-words">{opt}</span>
                           {p2Answered && isCorrectAnswer && <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0 ml-1" />}
                           {p2Answered && isSelected && !isCorrectAnswer && <XCircle className="w-4 h-4 text-red-400 flex-shrink-0 ml-1" />}
                         </button>
